@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Body + Finger Scan Demo</title>
+
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: #000;
+    }
+
+    video, canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+
+    #status {
+      position: fixed;
+      bottom: 10px;
+      left: 10px;
+      background: rgba(0,0,0,0.8);
+      color: lime;
+      padding: 10px 14px;
+      font-family: monospace;
+      border-radius: 6px;
+      z-index: 10;
+    }
+
+    #result {
+      position: fixed;
+      bottom: 10px;
+      right: 10px;
+      color: #0ff;
+      font-family: monospace;
+      background: rgba(0,0,0,0.8);
+      padding: 8px 12px;
+      border-radius: 6px;
+      z-index: 10;
+    }
+  </style>
+</head>
+
+<body>
+  
+  <video id="video" width="640" height="480" autoplay></video>
+  <canvas id="canvas" width="640" height="480"></canvas>
+
+  <div id="status">Waiting...</div>
+  <div id="result">Arduino: --</div>
+
+  <!-- MediaPipe libraries -->
+  <script src="library/pose.js"></script>
+  <script src="library/hands.js"></script>
+  <script src="library/camera_utils.js"></script>
+  <script src="library/drawing_utils.js"></script>
+
+  <script>
+    const video  = document.getElementById("video");
+    const canvas = document.getElementById("canvas");
+    const ctx    = canvas.getContext("2d");
+    const status = document.getElementById("status");
+    const result = document.getElementById("result");
+
+    let lastCmd = null; // debounce Arduino command
+    let lastState = null; // 'OPEN' or 'CLOSED'
+    
+    /* ================= ARDUINO ================= */
+    function sendCmd(cmd) {
+      if (cmd === lastCmd) return; // prevent spam
+      lastCmd = cmd;
+
+      fetch("control.php?cmd=" + cmd)
+        .then(res => res.text())
+        .then(data => result.innerText = "Arduino: " + data)
+        .catch(() => result.innerText = "Arduino: ERROR");
+    }
+
+
+    function isHandClosed(hand) {
+      const fingers = [
+        { tip: 8,  pip: 6  }, // Index
+        { tip: 12, pip: 10 }, // Middle
+        { tip: 16, pip: 14 }, // Ring
+        { tip: 20, pip: 18 }  // Pinky
+      ];
+
+      let closedCount = 0;
+
+      fingers.forEach(f => {
+        if (hand[f.tip].y > hand[f.pip].y) {
+          closedCount++;
+        }
+      });
+
+      return closedCount >= 3; // at least 3 fingers folded
+    }
+
+    /* ================= POSE ================= */
+    const pose = new Pose({
+      locateFile: f => `library/${f}`
+    });
+
+    pose.setOptions({
+      modelComplexity: 1,
+      smoothLandmarks: true,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5
+    });
+
+    function isLyingDown(p) {
+      const head     = p[0].y;
+      const shoulder = (p[11].y + p[12].y) / 2;
+      const hip      = (p[23].y + p[24].y) / 2;
+      const knee     = (p[25].y + p[26].y) / 2;
+
+      return (
+        Math.abs(head - shoulder) < 0.08 &&
+        Math.abs(shoulder - hip)  < 0.08 &&
+        Math.abs(hip - knee)      < 0.08
+      );
+    }
+
+    pose.onResults(res => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(res.image, 0, 0, canvas.width, canvas.height);
+
+      if (!res.poseLandmarks) return;
+
+      drawConnectors(ctx, res.poseLandmarks, POSE_CONNECTIONS,
+        { color: "#00ff00", lineWidth: 3 });
+      drawLandmarks(ctx, res.poseLandmarks,
+        { color: "#ff0000", lineWidth: 2 });
+
+      if (isLyingDown(res.poseLandmarks)) {
+        status.innerText = "NIHIGDA ANG TAO";
+        sendCmd(1);
+      } else {
+        status.innerText = "Nakatindog / Naglingkod";
+        sendCmd(0);
+      }
+    });
+
+    /* ================= HANDS ================= */
+    const hands = new Hands({
+      locateFile: f =>
+        `library/${f}`
+    });
+
+    hands.setOptions({
+      maxNumHands: 2,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5
+    });
+
+    hands.onResults(res => {
+      if (!res.multiHandLandmarks) return;
+
+      res.multiHandLandmarks.forEach(hand => {
+        drawConnectors(ctx, hand, HAND_CONNECTIONS,
+          { color: "#00ffff", lineWidth: 3 });
+        drawLandmarks(ctx, hand,
+          { color: "#ffff00", lineWidth: 2 });
+          console.log(hand[8].y - hand[5].y); // index finger tip - base
+
+          const isClosed = isHandClosed(hand);
+
+          if (isClosed && lastState !== "CLOSED") {
+            lastState = "CLOSED";
+            status.innerText = "✊ DILI BUKHAD ANG KAMOT";
+            sendCmd(1); // KASA RA MOTAWAG
+          }
+
+          if (!isClosed && lastState !== "OPEN") {
+            lastState = "OPEN";
+            status.innerText = "✋ BUKHAD ANG KAMOT";
+            sendCmd(0); // KASA RA MOTAWAG
+          }
+      });
+    });
+
+    /* ================= CAMERA ================= */
+    const camera = new Camera(video, {
+      onFrame: async () => {
+        await pose.send({ image: video });
+        await hands.send({ image: video });
+      },
+      width: 640,
+      height: 480
+    });
+
+    camera.start();
+  </script>
+
+</body>
+</html>
